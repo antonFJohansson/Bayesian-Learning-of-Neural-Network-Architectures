@@ -1,0 +1,41 @@
+class Network(nn.Module):
+  
+  def __init__(self):
+    super().__init__()
+    self.fc1 = BayesLinear(1, 200, False)
+    self.fc2 = BayesLinear(200, 200)
+    self.fc3 = BayesLinear(200, 1, False)
+    self.loss_fn = nn.MSELoss(reduction = 'sum')
+    
+    
+  ## I should just add all the VI terms here but they should probably be subtracted later on from the regular loss I think
+  def calc_VI(self):
+    VI_1 = self.fc1.layer_VI + self.fc1.weight_VI + self.fc1.bias_VI
+    if self.fc1.bypass:
+      VI_1 = VI_1 + self.fc1.bypass_VI
+      
+    VI_2 = self.fc2.layer_VI + self.fc2.weight_VI + self.fc2.bias_VI
+    if self.fc1.bypass:
+      VI_2 = VI_2 + self.fc2.bypass_VI
+      
+    VI_3 = self.fc3.layer_VI + self.fc3.weight_VI + self.fc3.bias_VI
+    if self.fc1.bypass:
+      VI_3 = VI_3 + self.fc3.bypass_VI
+    
+    return VI_1 + VI_2 + VI_3
+  
+  def calc_loss(self, x, y):
+    ## Only one sample for now
+    
+    out = self.forward(x)
+    loss = self.loss_fn(out, y)
+    tot_loss = loss + self.calc_VI()
+    return tot_loss
+  
+  
+  def forward(self, x):
+    x = F.relu(self.fc1(x))
+    x = F.relu(self.fc2(x))
+    x = self.fc3(x)
+    return x
+    
