@@ -48,7 +48,7 @@ class BayesLinear(nn.Module):
     self.prior_weight_mu = torch.tensor(0.)
     self.prior_weight_sigma = torch.tensor(2.)
     self.prior_layer_mu = torch.tensor(h2/2)
-    prior_var = (h2-1)/100 if h2 != 1 else 0.5
+    prior_var = (h2-1)/2 if h2 != 1 else 0.5
     self.prior_layer_sigma = torch.tensor(prior_var) ## Should it be h1-1 here?
     self.prior_layer_pi = self.layer_pi(self.prior_layer_mu, self.prior_layer_sigma)
     self.prior_bypass_pi = torch.tensor(0.5)
@@ -150,6 +150,7 @@ class BayesLinear(nn.Module):
   def forward(self, x):
     if self.bypass:
       bypass_pi = self.bypass_pi(self.bypass_a)
+      self.by_pi = bypass_pi 
       random_logistic = torch.tensor(logistic(0,1))
       gamma = 1 / (1 + torch.exp((-(torch.log(bypass_pi + EPS_FACTOR)-torch.log(1-bypass_pi + EPS_FACTOR) + random_logistic)/self.tau)))
     
@@ -209,9 +210,12 @@ class Network(nn.Module):
     self.fc1 = BayesLinear(1, 50, False)
     self.fc2 = BayesLinear(50, 50, True)
     self.fc3 = BayesLinear(50, 50, True)
-    self.fc4 = BayesLinear(50, 1, False)
+    self.fc4 = BayesLinear(50, 50, True)
+    self.fc5 = BayesLinear(50, 50, True)
+    self.fc6 = BayesLinear(50, 50, True)
+    self.fc7 = BayesLinear(50, 1, False)
     self.loss_fn = nn.MSELoss(reduction = 'sum')
-    self.layer_list = [self.fc1, self.fc2, self.fc3, self.fc4]
+    self.layer_list = [self.fc1, self.fc2, self.fc3, self.fc4, self.fc5, self.fc6, self.fc7]
     
   ## I should just add all the VI terms here but they should probably be subtracted later on from the regular loss I think
   def calc_VI(self):
@@ -245,7 +249,7 @@ import torch.optim as optim
 
 my_net = Network()
 
-max_epoch = 5000
+max_epoch = 30000
 opt = optim.Adam(my_net.parameters(), lr = 0.01)
 #with autograd.detect_anomaly():
 for epoch in range(max_epoch):
@@ -253,7 +257,7 @@ for epoch in range(max_epoch):
       
       my_net.zero_grad()
       loss1, loss2 = my_net.calc_loss(x_t, y_t)
-      total_loss = loss1 + loss2 / 40
+      total_loss = loss1 + loss2 / 1
       total_loss.backward()
       opt.step()
       #print(my_net.fc2.weight_mu)
