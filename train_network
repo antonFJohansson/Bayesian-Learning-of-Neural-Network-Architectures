@@ -1,0 +1,29 @@
+import torch
+import torch.nn as nn
+import math
+
+import torch.optim as optim
+my_net = Network()
+
+
+
+max_epoch = 2000
+opt = optim.Adam(my_net.parameters(), lr = 0.01)
+
+weight_step = 0.0
+weight_factor = torch.exp(torch.tensor(weight_step))
+
+#with autograd.detect_anomaly():
+for epoch in range(max_epoch):
+      
+      
+      my_net.zero_grad()
+      loss1, loss2 = my_net.calc_loss(x_t, y_t)
+      total_loss = loss1 + loss2 * weight_factor
+      total_loss.backward()
+      opt.step()
+      if epoch % (max_epoch // 10) == 0:
+        print('Epoch {} Likelihood Loss {:.2f} Prior Loss {:.2f}'.format(epoch, loss1, loss2))      
+        weight_step = weight_step + 0.5
+        weight_factor = torch.exp(-torch.tensor(weight_step))
+
