@@ -7,56 +7,65 @@ Created on Mon Apr 15 07:14:32 2019
 import torch
 import torch.nn as nn
 import math
+
+import numpy as np
 from torch.distributions.normal import Normal
 from numpy.random import logistic
 import torch.nn.functional as F
 from numpy import triu, ones
 
+## For numerical stability
 EPS_FACTOR = 1e-10
 
 
-
-torch.manual_seed(0)
-np.random.seed(0)
+#torch.manual_seed(0)
+#np.random.seed(0)
 
 class BayesLinear(nn.Module):
   
   
   def __init__(self, h1, h2, bypass = True):
     super().__init__()
-    #self.layerp = layerp
     self.bypass = bypass
     self.input_size = h1
     self.output_size = h2
     self.total_dim = h1*h2 ## If we see it as independent Gaussians then this is the full dimension of that distribution
     
+    ## The init for the weight and bias parameters w.r.t the Normal dist
     mu_init_var = math.sqrt(2) * math.sqrt(2 / (h1 + h2))
-    self.weight_mu = nn.Parameter(torch.Tensor(h1, h2).normal_(0, mu_init_var)) ## Get better init here later
-    self.weight_rho = nn.Parameter(torch.Tensor(h1, h2).uniform_(-5,-4))#torch.Tensor(h1, h2).uniform_(-15,-14)
+    self.weight_mu = nn.Parameter(torch.Tensor(h1, h2).normal_(0, mu_init_var)) 
+    self.weight_rho = nn.Parameter(torch.Tensor(h1, h2).uniform_(-5,-4))
     self.bias_mu = nn.Parameter(torch.Tensor(h2).normal_(0, 0.001))
-    self.bias_rho = nn.Parameter(torch.Tensor(h2).uniform_(-5, -4))#torch.Tensor(h2).uniform_(-15, -14)#
+    self.bias_rho = nn.Parameter(torch.Tensor(h2).uniform_(-5, -4))
     
-    #if layerp:
+    ## The init for the layer mean and variance 
     layer_mean = h2/2 if h2 != 1 else 1
-    self.layer_mu = nn.Parameter(torch.Tensor(1).normal_(layer_mean, 0.5)) ## We only have one my parameter for each layer right?
+    self.layer_mu = nn.Parameter(torch.Tensor(1).normal_(layer_mean, 10)) ## This one can be changed for different init for the layer mean. I had 0.5 as the variance
+    self.layer_rho = nn.Parameter(torch.Tensor(1).uniform_(1, 10)) 
     
-    self.layer_rho = nn.Parameter(torch.Tensor(1).uniform_(1, 10)) ## They haven't actually written which repara they use for the sigma but I guess it is like usual?
+    ## The init if the layer has a bypass parameter
     if bypass:
       self.bypass_a = nn.Parameter(torch.Tensor(1).normal_(0,1))
+      
+     
     ## Some prior parameters under here
     self.tau = torch.tensor(1.) ## The temperature
     self.prior_weight_mu = torch.tensor(0.)
     self.prior_weight_sigma = torch.tensor(2.)
-    self.prior_layer_mu = torch.tensor(h2/2)
-    prior_var = (h2-1)/2 if h2 != 1 else 0.5
-    self.prior_layer_sigma = torch.tensor(prior_var) ## Should it be h1-1 here?
+    
+    self.prior_layer_mu = torch.tensor(h2/2) ## This one can be changed for different prior beliefs on the size of the network
+    
+    prior_var = (h2-1)/2 if h2 != 1 else 1.0
+    self.prior_layer_sigma = torch.tensor(prior_var) 
     self.prior_layer_pi = self.layer_pi(self.prior_layer_mu, self.prior_layer_sigma)
     self.prior_bypass_pi = torch.tensor(0.5)
+    
+    ## The upper triangular matrix
     self.U = torch.from_numpy(triu(ones((h2, h2)))).float()
   
   def truncated_normal(self, x, mu, sigma):
     
-    mu_n = mu.clone().detach() ## Maybe need to change this here?
+    mu_n = mu.clone().detach() 
     sigma_n = sigma.clone().detach() 
     norm = Normal(mu_n, sigma_n)
     left_val = norm.cdf(1)
@@ -68,7 +77,7 @@ class BayesLinear(nn.Module):
     p1 = log_normal(x, mu, sigma)
     p2 = torch.log(right_val - left_val) if right_val != left_val else torch.tensor(0.)
     
-    return torch.exp(p1-p2)# + EPS_FACTOR ## p1 kan bli 0 har om vardena ar tillrackligt smma
+    return torch.exp(p1-p2)
   
   ## The parameter pi for the layer bypass gumbal later. bypass_a should be inserted here
   def bypass_pi(self, x):
@@ -80,18 +89,13 @@ class BayesLinear(nn.Module):
   
   ## This one gives me the probability for the layer vector, later I also have to sample from Gumbal using this as pi
   def layer_pi(self, mu, sigma):
-    #print(sigma)
     input_x = torch.arange(1,self.output_size + 1).float()
     p1 = self.truncated_normal(input_x, mu, sigma)
     p2 = torch.sum(p1)
-    #print(x)
-    return p1 / p2 ## Maybe do this with a log?
+    return p1 / p2 
     
-  ## I also need some term that calculates all the variational terms right?
   ## s_p here is the sampled simplex vector
   def calc_layer_VI(self, s_p, post_lay_pi):
-    #print(s_p)
-    #print(post_lay_pi)
     ## Calc the prior term here first
     p1 = torch.log(torch.arange(1,self.output_size).float() + EPS_FACTOR).sum()
     p2 = (self.output_size - 1)*torch.log(self.tau)
@@ -100,13 +104,12 @@ class BayesLinear(nn.Module):
     p4 = self.output_size * torch.log((self.prior_layer_pi * torch.pow(s_p + EPS_FACTOR, -self.tau)).sum())
     log_prior = p1 + p2 + p3 - p4    
     
-    ## And now calculate the variational posterior term.. But I guess in the exact same way just with different parameters?
+    ## And now calculate the variational posterior term. But I guess in the exact same way just with different parameters?
     p1 = torch.log(torch.arange(1,self.output_size).float() + EPS_FACTOR).sum()
     p2 = (self.output_size - 1)*torch.log(self.tau)
     p3 = (torch.log(post_lay_pi + EPS_FACTOR) - (self.tau + 1)*torch.log(s_p + EPS_FACTOR)).sum()
     p4 = self.output_size * torch.log((post_lay_pi * torch.pow(s_p + EPS_FACTOR, -self.tau)).sum() + EPS_FACTOR)
     log_post = p1 + p2 + p3 - p4
-    #print(p1,p2,p3,p4)
     return log_post - log_prior
   
   def calc_bypass_VI(self, s_p, post_bypass_pi):
@@ -139,7 +142,7 @@ class BayesLinear(nn.Module):
     
   ## Should just return a sample of the concete categorical distribution
   def concrete_cat_sample(self, layer_pi):
-    eps = -torch.log(-torch.log(torch.Tensor(self.output_size).uniform_(0,1) + EPS_FACTOR)) ## Might be good to have an eps factor here but I don't know if it is so likely
+    eps = -torch.log(-torch.log(torch.Tensor(self.output_size).uniform_(0,1) + EPS_FACTOR))
     
     ## Calc the sample here
     p1 = (torch.log(layer_pi + EPS_FACTOR) + eps) / self.tau
@@ -154,7 +157,6 @@ class BayesLinear(nn.Module):
       random_logistic = torch.tensor(logistic(0,1))
       gamma = 1 / (1 + torch.exp((-(torch.log(bypass_pi + EPS_FACTOR)-torch.log(1-bypass_pi + EPS_FACTOR) + random_logistic)/self.tau)))
     
-    #print('bajs')
     lay_mu = self.layer_mu
     lay_sig = self.sigma(self.layer_rho)
     lay_pi = self.layer_pi(lay_mu, lay_sig)
@@ -171,16 +173,13 @@ class BayesLinear(nn.Module):
     b_sigma = self.sigma(self.bias_rho)
     bias = b_mu + b_sigma * torch.Tensor(b_mu.shape).normal_(0,1)
     
-    ## I don't have any bias term for the layer and bypass, they only affect the regular neurons yes
+    ## I don't have any bias term for the layer and bypass, they only affect the regular neurons
     self.layer_VI = self.calc_layer_VI(s_p, lay_pi)
     self.weight_VI = self.calc_normal_KL(w_mu, w_sigma)
     self.bias_VI = self.calc_normal_KL(b_mu, b_sigma)
-    #print(self.layer_VI, self.weight_VI, self.bias_VI)
     if self.bypass:
-      self.bypass_VI = self.calc_bypass_VI(gamma, bypass_pi).item() ## I think it should be gamma here right?. Maybe also check why it returned more dimensions to the tensor
-    ## And then I just need the Gaussian KL term here
+      self.bypass_VI = self.calc_bypass_VI(gamma, bypass_pi).item()
     
-    #soft_mask = torch.ones(soft_mask.shape)
     if self.bypass:
       
       return (1-gamma)*F.linear(x, torch.t(weight), bias) * soft_mask + gamma * x
@@ -195,10 +194,11 @@ class BayesLinear(nn.Module):
 from torch import autograd
 
 import numpy as np
-x = np.arange(0,5,0.01)
-y = np.sin(x) + np.exp(-x) + np.random.normal(0,0.1,x.shape)
+x = np.arange(-2,8,0.01)
+
+y = np.sin(x) + np.random.normal(0,0.1,x.shape)
+x = (x - np.mean(x)) / np.std(x)
 import matplotlib.pyplot as plt
-plt.plot(x,y)
 x_t = torch.from_numpy(x).view(-1,1).float()
 y_t = torch.from_numpy(y).view(-1,1).float()
 
@@ -217,7 +217,6 @@ class Network(nn.Module):
     self.loss_fn = nn.MSELoss(reduction = 'sum')
     self.layer_list = [self.fc1, self.fc2, self.fc3, self.fc4, self.fc5, self.fc6, self.fc7]
     
-  ## I should just add all the VI terms here but they should probably be subtracted later on from the regular loss I think
   def calc_VI(self):
       
     VI_tot = 0
@@ -228,12 +227,21 @@ class Network(nn.Module):
     
     return VI_tot
   
-  def calc_loss(self, x, y):
-    ## Only one sample for now
+  def calc_loss(self, x, y, num_train_samples = 1):
     
-    out = self.forward(x)
-    loss = self.loss_fn(out, y)
-    return loss, self.calc_VI()
+    loss1_store = torch.zeros((1, num_train_samples))
+    loss2_store = torch.zeros((1, num_train_samples))
+    
+    for rrr in range(num_train_samples):
+
+      out = self.forward(x)
+      loss = self.loss_fn(out, y)
+      loss1_store[0, rrr] = loss
+      loss2_store[0, rrr] = self.calc_VI()
+      
+      final_loss1 = torch.mean(loss1_store)
+      final_loss2 = torch.mean(loss2_store)
+    return final_loss1, final_loss2
   
   
   def forward(self, x):
@@ -246,33 +254,27 @@ class Network(nn.Module):
 
     
 import torch.optim as optim
-
 my_net = Network()
 
-max_epoch = 30000
+
+
+max_epoch = 2000
 opt = optim.Adam(my_net.parameters(), lr = 0.01)
+
+weight_step = 0.0
+weight_factor = torch.exp(torch.tensor(weight_step))
+
 #with autograd.detect_anomaly():
 for epoch in range(max_epoch):
       
       
       my_net.zero_grad()
       loss1, loss2 = my_net.calc_loss(x_t, y_t)
-      total_loss = loss1 + loss2 / 1
+      total_loss = loss1 + loss2 * weight_factor
       total_loss.backward()
       opt.step()
-      #print(my_net.fc2.weight_mu)
-      print('Epoch {} Ordinary Loss {:.2f} Variational Loss {:.2f}'.format(epoch, loss1, loss2))      
-
-#%%
-x_plot = np.arange(-1,6,0.001)
-x_plot_n = torch.from_numpy(x_plot).float().view(-1,1)
-out_plot = my_net(x_plot_n)
-plt.plot(x_plot, out_plot.detach().numpy())
-out_plot = my_net(x_plot_n)
-plt.plot(x_plot, out_plot.detach().numpy())
-out_plot = my_net(x_plot_n)
-plt.plot(x_plot, out_plot.detach().numpy())
-out_plot = my_net(x_plot_n)
-plt.plot(x_plot, out_plot.detach().numpy())
-plt.axis([-1, 6, -2, 2])
+      if epoch % (max_epoch // 10) == 0:
+        print('Epoch {} Likelihood Loss {:.2f} Prior Loss {:.2f}'.format(epoch, loss1, loss2))      
+        weight_step = weight_step + 0.5
+        weight_factor = torch.exp(-torch.tensor(weight_step))
 
