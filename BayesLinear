@@ -1,9 +1,19 @@
+import torch
 import torch.nn as nn
 import math
+
+import numpy as np
 from torch.distributions.normal import Normal
 from numpy.random import logistic
 import torch.nn.functional as F
 from numpy import triu, ones
+
+## For numerical stability
+EPS_FACTOR = 1e-10
+
+
+#torch.manual_seed(0)
+#np.random.seed(0)
 
 class BayesLinear(nn.Module):
   
@@ -15,37 +25,52 @@ class BayesLinear(nn.Module):
     self.output_size = h2
     self.total_dim = h1*h2 ## If we see it as independent Gaussians then this is the full dimension of that distribution
     
+    ## The init for the weight and bias parameters w.r.t the Normal dist
     mu_init_var = math.sqrt(2) * math.sqrt(2 / (h1 + h2))
-    self.weight_mu = nn.Parameter(torch.Tensor(h1, h2).normal_(0, mu_init_var)) ## Get better init here later
+    self.weight_mu = nn.Parameter(torch.Tensor(h1, h2).normal_(0, mu_init_var)) 
     self.weight_rho = nn.Parameter(torch.Tensor(h1, h2).uniform_(-5,-4))
-    self.bias_mu = nn.Parameter(torch.Tensor(h2).normal_(0,0.001))
+    self.bias_mu = nn.Parameter(torch.Tensor(h2).normal_(0, 0.001))
     self.bias_rho = nn.Parameter(torch.Tensor(h2).uniform_(-5, -4))
-    self.layer_mu = nn.Parameter(torch.Tensor(1).normal_(h2 / 2, 0.1)) ## We only have one my parameter for each layer right?
-    self.layer_rho = nn.Parameter(torch.Tensor(1).uniform_(-5, -4)) ## They haven't actually written which repara they use for the sigma but I guess it is like usual?
+    
+    ## The init for the layer mean and variance 
+    layer_mean = h2/2 if h2 != 1 else 1
+    self.layer_mu = nn.Parameter(torch.Tensor(1).normal_(layer_mean, 10)) ## This one can be changed for different init for the layer mean. I had 0.5 as the variance
+    self.layer_rho = nn.Parameter(torch.Tensor(1).uniform_(1, 10)) 
+    
+    ## The init if the layer has a bypass parameter
     if bypass:
       self.bypass_a = nn.Parameter(torch.Tensor(1).normal_(0,1))
+      
+     
     ## Some prior parameters under here
     self.tau = torch.tensor(1.) ## The temperature
     self.prior_weight_mu = torch.tensor(0.)
     self.prior_weight_sigma = torch.tensor(2.)
-    self.prior_layer_mu = torch.tensor(h2/2)
-    self.prior_layer_sigma = torch.tensor((h2-h1)/100)
+    
+    self.prior_layer_mu = torch.tensor(h2/2) ## This one can be changed for different prior beliefs on the size of the network
+    
+    prior_var = (h2-1)/2 if h2 != 1 else 1.0
+    self.prior_layer_sigma = torch.tensor(prior_var) 
     self.prior_layer_pi = self.layer_pi(self.prior_layer_mu, self.prior_layer_sigma)
     self.prior_bypass_pi = torch.tensor(0.5)
+    
+    ## The upper triangular matrix
     self.U = torch.from_numpy(triu(ones((h2, h2)))).float()
   
   def truncated_normal(self, x, mu, sigma):
     
-    norm = Normal(mu, sigma)
+    mu_n = mu.clone().detach() 
+    sigma_n = sigma.clone().detach() 
+    norm = Normal(mu_n, sigma_n)
     left_val = norm.cdf(1)
     right_val = norm.cdf(self.output_size)
     
-    
     def log_normal(x, mu, sigma):
-      return -1 / 2 * torch.log(2*math.pi*sigma**2) - 1/ (2 * sigma**2) * (x-mu)**2
+      return -1 / 2 * torch.log(2*math.pi*sigma**2 + EPS_FACTOR) - 1/ (2 * sigma**2 + EPS_FACTOR) * (x-mu)**2
     
     p1 = log_normal(x, mu, sigma)
-    p2 = torch.log(right_val - left_val)
+    p2 = torch.log(right_val - left_val) if right_val != left_val else torch.tensor(0.)
+    
     return torch.exp(p1-p2)
   
   ## The parameter pi for the layer bypass gumbal later. bypass_a should be inserted here
@@ -54,55 +79,53 @@ class BayesLinear(nn.Module):
   
   ## Converts rho to sigma parameter
   def sigma(self, x):
-    return torch.log1p(torch.exp(-x))
+    return torch.log1p(torch.exp(x))
   
   ## This one gives me the probability for the layer vector, later I also have to sample from Gumbal using this as pi
   def layer_pi(self, mu, sigma):
-    
     input_x = torch.arange(1,self.output_size + 1).float()
     p1 = self.truncated_normal(input_x, mu, sigma)
     p2 = torch.sum(p1)
-    return p1 / p2 ## Maybe do this with a log?
+    return p1 / p2 
     
-  ## I also need some term that calculates all the variational terms right?
-  ## s here is the sampled simplex vector
-  def calc_layer_VI(self, s, post_lay_pi):
-    
+  ## s_p here is the sampled simplex vector
+  def calc_layer_VI(self, s_p, post_lay_pi):
     ## Calc the prior term here first
-    p1 = torch.log(torch.arange(1,self.output_size).float()).sum()
+    p1 = torch.log(torch.arange(1,self.output_size).float() + EPS_FACTOR).sum()
     p2 = (self.output_size - 1)*torch.log(self.tau)
-    p3 = (torch.log(self.prior_layer_pi) - (self.tau + 1)*torch.log(s)).sum()
-    p4 = self.output_size * torch.log((self.prior_layer_pi * torch.pow(s, -self.tau)).sum())
+    
+    p3 = (torch.log(self.prior_layer_pi + EPS_FACTOR) - (self.tau + 1)*torch.log(s_p + EPS_FACTOR)).sum()
+    p4 = self.output_size * torch.log((self.prior_layer_pi * torch.pow(s_p + EPS_FACTOR, -self.tau)).sum())
     log_prior = p1 + p2 + p3 - p4    
     
-    ## And now calculate the variational posterior term.. But I guess in the exact same way just with different parameters?
-    p1 = torch.log(torch.arange(1,self.output_size).float()).sum()
+    ## And now calculate the variational posterior term. But I guess in the exact same way just with different parameters?
+    p1 = torch.log(torch.arange(1,self.output_size).float() + EPS_FACTOR).sum()
     p2 = (self.output_size - 1)*torch.log(self.tau)
-    p3 = (torch.log(post_lay_pi) - (self.tau + 1)*torch.log(s)).sum()
-    p4 = self.output_size * torch.log((post_lay_pi * torch.pow(s, -torch.tau)).sum())
+    p3 = (torch.log(post_lay_pi + EPS_FACTOR) - (self.tau + 1)*torch.log(s_p + EPS_FACTOR)).sum()
+    p4 = self.output_size * torch.log((post_lay_pi * torch.pow(s_p + EPS_FACTOR, -self.tau)).sum() + EPS_FACTOR)
     log_post = p1 + p2 + p3 - p4
     return log_post - log_prior
   
-  def calc_bypass_VI(self, s, post_bypass_pi):
+  def calc_bypass_VI(self, s_p, post_bypass_pi):
     
     ## I am a little bit unsure if they have written it correctly in the article, should not 1-pi enter somewhere?
     ## First calculate the prior term
     p1 = torch.log(self.tau)
-    p2 = torch.log(self.prior_bypass_pi) - (self.tau + 1) *(torch.log(s) + torch.log(1-s))
-    p3 = 2*torch.log(self.prior_bypass_pi*torch.pow(s,-self.tau) + torch.pow((1-s),-self.tau))
+    p2 = torch.log(self.prior_bypass_pi + EPS_FACTOR) - (self.tau + 1) *(torch.log(s_p + EPS_FACTOR) + torch.log(1-s_p +EPS_FACTOR))
+    p3 = 2*torch.log(self.prior_bypass_pi*torch.pow(s_p + EPS_FACTOR,-self.tau) + torch.pow((1-s_p + EPS_FACTOR),-self.tau) +EPS_FACTOR)
     log_prior = p1 + p2 - p3
     
     ## And now the variational posterior terms here
     p1 = torch.log(self.tau)
-    p2 = torch.log(post_bypass_pi) - (self.tau + 1) *(torch.log(s) + torch.log(1-s))
-    p3 = 2*torch.log(post_bypass_pi*torch.pow(s,-self.tau) + torch.pow((1-s),-self.tau))
+    p2 = torch.log(post_bypass_pi + EPS_FACTOR) - (self.tau + 1) *(torch.log(s_p + EPS_FACTOR) + torch.log(1-s_p + EPS_FACTOR))
+    p3 = 2*torch.log(post_bypass_pi*torch.pow(s_p + EPS_FACTOR,-self.tau) + torch.pow((1-s_p),-self.tau) + EPS_FACTOR)
     log_post = p1 + p2 - p3
     return log_post - log_prior
   
   def calc_normal_KL(self, mu, sigma):
     
-    p1 = 2*self.total_dim*torch.log(self.prior_weight_sigma)
-    p2 = 2*torch.log(sigma).sum()
+    p1 = 2*self.total_dim*torch.log(self.prior_weight_sigma + EPS_FACTOR)
+    p2 = 2*torch.log(sigma + EPS_FACTOR).sum()
     p3 = self.total_dim
     p4 = (1 / self.prior_weight_sigma * sigma).sum()
     p5 = (1 / self.prior_weight_sigma * mu**2).sum()
@@ -113,10 +136,10 @@ class BayesLinear(nn.Module):
     
   ## Should just return a sample of the concete categorical distribution
   def concrete_cat_sample(self, layer_pi):
-    eps = -torch.log(-torch.log(torch.Tensor(self.output_size).uniform_(0,1))) ## Might be good to have an eps factor here but I don't know if it is so likely
+    eps = -torch.log(-torch.log(torch.Tensor(self.output_size).uniform_(0,1) + EPS_FACTOR))
     
     ## Calc the sample here
-    p1 = (torch.log(layer_pi) + eps) / self.tau
+    p1 = (torch.log(layer_pi + EPS_FACTOR) + eps) / self.tau
     p2 = torch.exp(p1)
     p3 = p2.sum()
     return p2 / p3
@@ -124,15 +147,17 @@ class BayesLinear(nn.Module):
   def forward(self, x):
     if self.bypass:
       bypass_pi = self.bypass_pi(self.bypass_a)
+      self.by_pi = bypass_pi 
       random_logistic = torch.tensor(logistic(0,1))
-      gamma = 1 / (1 + torch.exp((-(torch.log(bypass_pi)-torch.log(1-bypass_pi) + random_logistic)/self.tau)))
-
+      gamma = 1 / (1 + torch.exp((-(torch.log(bypass_pi + EPS_FACTOR)-torch.log(1-bypass_pi + EPS_FACTOR) + random_logistic)/self.tau)))
+    
     lay_mu = self.layer_mu
     lay_sig = self.sigma(self.layer_rho)
     lay_pi = self.layer_pi(lay_mu, lay_sig)
-    s = self.concrete_cat_sample(lay_pi)
-    s = torch.unsqueeze(s,0)
-    soft_mask = torch.mm(self.U, s.t()).t()
+    self.lay_pi = lay_pi
+    s_p = self.concrete_cat_sample(lay_pi)
+    s_p = torch.unsqueeze(s_p,0)
+    soft_mask = torch.mm(self.U, s_p.t()).t()
     
     w_mu = self.weight_mu
     w_sigma = self.sigma(self.weight_rho)
@@ -142,20 +167,18 @@ class BayesLinear(nn.Module):
     b_sigma = self.sigma(self.bias_rho)
     bias = b_mu + b_sigma * torch.Tensor(b_mu.shape).normal_(0,1)
     
-    ## I don't have any bias term for the layer and bypass, they only affect the regular neurons yes
-    self.layer_VI = self.calc_layer_VI(s, lay_pi)
-    self.bypass_VI = self.calc_bypass_VI(gamma, bypass_pi) ## I think it should be gamma here right?
+    ## I don't have any bias term for the layer and bypass, they only affect the regular neurons
+    self.layer_VI = self.calc_layer_VI(s_p, lay_pi)
     self.weight_VI = self.calc_normal_KL(w_mu, w_sigma)
     self.bias_VI = self.calc_normal_KL(b_mu, b_sigma)
-    ## And then I just need the Gaussian KL term here
-    
+    if self.bypass:
+      self.bypass_VI = self.calc_bypass_VI(gamma, bypass_pi).item()
     
     if self.bypass:
+      
       return (1-gamma)*F.linear(x, torch.t(weight), bias) * soft_mask + gamma * x
     else:
+      
       return F.linear(x, torch.t(weight), bias) * soft_mask
     
     
-    
-    
-a = BayesLinear(1,5, False)
