@@ -10,7 +10,7 @@ The program is most easily run by using the mainFile.py which will run the entir
 Parameters which can be controlled to get different results are
 
 - The initilization for the different parameters.
-- The prior beliefs about those parameters
-- The weight_factor which controls how much the prior loss affects the total loss
+- The prior beliefs about those parameters.
+- The weight_factor which controls how much the prior loss affects the total loss.
 
 These parameters have been chosen mostly empirically.
