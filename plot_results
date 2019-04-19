@@ -1,0 +1,31 @@
+plt.plot(x,y)
+left_plot_lim = -5
+right_plot_lim = 5
+x_plot = np.arange(left_plot_lim, right_plot_lim,0.001)
+x_plot_n = torch.from_numpy(x_plot).float().view(-1,1)
+
+SAMPLES = 15
+out_plot_store = torch.zeros((x_plot_n.shape[0], SAMPLES))
+for iii in range(SAMPLES):
+  
+  out_plot = my_net(x_plot_n)
+  out_plot_store[:,iii] = out_plot[:,0]
+
+  
+sorted_val = torch.sort(out_plot_store)
+upper_ind = int(0.8*SAMPLES)
+lower_ind = int(0.2*SAMPLES)
+
+q80 = sorted_val[0][:, upper_ind].detach().numpy()
+q20 = sorted_val[0][:, lower_ind].detach().numpy()
+  
+max_plot = torch.max(out_plot_store, 1)
+min_plot = torch.min(out_plot_store, 1)
+mean_plot = torch.mean(out_plot_store, 1)
+lb = min_plot[0].detach().numpy()
+ub = max_plot[0].detach().numpy()
+
+plt.plot(x_plot, mean_plot.detach().numpy())
+plt.fill_between(x_plot, lb, ub, facecolor='orange', alpha=0.5)
+plt.fill_between(x_plot, q20, q80, facecolor='blue', alpha=0.5)
+plt.axis([left_plot_lim, right_plot_lim, -4, 4])   
