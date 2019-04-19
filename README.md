@@ -14,3 +14,5 @@ Parameters which can be controlled to get different results are
 - The weight_factor which controls how much the prior loss affects the total loss.
 
 These parameters have been chosen mostly empirically.
+
+There is a notebook version of the code in NotebookVersion_n.
