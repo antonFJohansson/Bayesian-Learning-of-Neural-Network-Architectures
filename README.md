@@ -12,6 +12,7 @@ Parameters which can be controlled to get different results are
 - The initilization for the different parameters.
 - The prior beliefs about those parameters.
 - The weight_factor which controls how much the prior loss affects the total loss.
+- The number of samples in the training loop (does not seem to affect the results much though).
 
 These parameters have been chosen mostly empirically.
 
